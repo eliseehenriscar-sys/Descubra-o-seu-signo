@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
 Descubra o Seu Signo - Servidor + SQLite
+- signos: 12 signos
+- consultas: histórico de cada busca
 """
 import http.server
 import socketserver
@@ -31,9 +33,15 @@ def porta_livre(inicio=8000, tentativas=20):
     return None
 
 
+def get_conn():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 def criar_banco():
     print(f"[DB] Caminho do banco: {DB_PATH}")
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cur = conn.cursor()
 
     cur.execute("""
@@ -51,6 +59,16 @@ def criar_banco():
             amor TEXT NOT NULL,
             fortes TEXT NOT NULL,
             compat TEXT NOT NULL
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS consultas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            data_nascimento TEXT NOT NULL,
+            signo_chave TEXT NOT NULL,
+            signo_nome TEXT NOT NULL,
+            data_hora TEXT NOT NULL
         )
     """)
 
@@ -138,10 +156,12 @@ def criar_banco():
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, dados)
         conn.commit()
-        print(f"[DB] Banco CRIADO e populado com {len(dados)} signos.")
+        print(f"[DB] Tabela signos: criada com {len(dados)} signos.")
     else:
-        print(f"[DB] Banco OK — {count} signos encontrados.")
+        print(f"[DB] Tabela signos: OK — {count} signos.")
 
+    cur.execute("SELECT COUNT(*) FROM consultas")
+    print(f"[DB] Tabela consultas: OK — {cur.fetchone()[0]} registro(s).")
     conn.close()
     return True
 
@@ -164,30 +184,70 @@ def descobrir_chave(mes, dia):
 
 def buscar_signo_por_chave(chave):
     try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
+        conn = get_conn()
         cur = conn.cursor()
         cur.execute("SELECT * FROM signos WHERE chave = ?", (chave,))
         row = cur.fetchone()
         conn.close()
-        if row is None:
-            return None
-        return dict(row)
+        return dict(row) if row else None
     except Exception as e:
         print(f"[DB ERRO] {e}")
         return None
 
 
+def salvar_consulta(data_nascimento, signo_chave, signo_nome):
+    try:
+        agora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO consultas (data_nascimento, signo_chave, signo_nome, data_hora) VALUES (?, ?, ?, ?)",
+            (data_nascimento, signo_chave, signo_nome, agora)
+        )
+        conn.commit()
+        novo_id = cur.lastrowid
+        conn.close()
+        print(f"[DB] Consulta salva id={novo_id} | {data_nascimento} → {signo_nome}")
+        return novo_id
+    except Exception as e:
+        print(f"[DB ERRO ao salvar] {e}")
+        return None
+
+
+def listar_consultas(limite=30):
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, data_nascimento, signo_chave, signo_nome, data_hora FROM consultas ORDER BY id DESC LIMIT ?",
+            (limite,)
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return rows
+    except Exception as e:
+        print(f"[DB ERRO] {e}")
+        return []
+
+
 def status_banco():
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_conn()
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM signos")
-        total = cur.fetchone()[0]
+        total_signos = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM consultas")
+        total_consultas = cur.fetchone()[0]
         cur.execute("SELECT chave, nome FROM signos ORDER BY id")
         lista = [{"chave": r[0], "nome": r[1]} for r in cur.fetchall()]
         conn.close()
-        return {"ok": True, "caminho": DB_PATH, "total": total, "signos": lista}
+        return {
+            "ok": True,
+            "caminho": DB_PATH,
+            "total_signos": total_signos,
+            "total_consultas": total_consultas,
+            "signos": lista
+        }
     except Exception as e:
         return {"ok": False, "erro": str(e), "caminho": DB_PATH}
 
@@ -209,14 +269,17 @@ class MyHandler(http.server.SimpleHTTPRequestHandler):
             self._json_response(status_banco())
             return
 
+        if path == "/api/historico":
+            lista = listar_consultas(30)
+            self._json_response({"ok": True, "total": len(lista), "consultas": lista})
+            return
+
         if path == "/api/signo":
             qs = parse_qs(parsed.query)
             data_str = qs.get("data", [None])[0]
-
             if not data_str:
                 self._json_response({"erro": "Falta o parâmetro data (YYYY-MM-DD)."}, 400)
                 return
-
             try:
                 dt = datetime.strptime(data_str, "%Y-%m-%d")
                 mes, dia = dt.month, dt.day
@@ -227,16 +290,14 @@ class MyHandler(http.server.SimpleHTTPRequestHandler):
             chave = descobrir_chave(mes, dia)
             print(f"[API] data={data_str} → chave={chave}")
             signo = buscar_signo_por_chave(chave)
-
             if signo is None:
-                self._json_response({
-                    "erro": "Signo não encontrado no banco.",
-                    "chave_buscada": chave,
-                    "db_path": DB_PATH
-                }, 404)
+                self._json_response({"erro": "Signo não encontrado.", "chave": chave}, 404)
                 return
 
-            resposta = {
+            # SALVA NO BANCO
+            salvar_consulta(data_str, signo["chave"], signo["nome"])
+
+            self._json_response({
                 "chave": signo["chave"],
                 "nome": signo["nome"],
                 "simbolo": signo["simbolo"],
@@ -249,14 +310,12 @@ class MyHandler(http.server.SimpleHTTPRequestHandler):
                 "amor": signo["amor"],
                 "fortes": signo["fortes"],
                 "compat": signo["compat"],
-            }
-            self._json_response(resposta)
+            })
             return
 
         if path == "/" or path == "/index.html":
             self.path = "/index.html"
             return super().do_GET()
-
         return super().do_GET()
 
     def _json_response(self, data, status=200):
@@ -270,24 +329,20 @@ class MyHandler(http.server.SimpleHTTPRequestHandler):
 
 if __name__ == "__main__":
     print("=" * 55)
-    print("  Iniciando Descubra o Seu Signo")
+    print("  Descubra o Seu Signo + SQLite")
     print("=" * 55)
-    print(f"  Pasta do projeto: {BASE_DIR}")
-
+    print(f"  Pasta: {BASE_DIR}")
     criar_banco()
-
     st = status_banco()
     if not st["ok"]:
-        print(f"[ERRO] Banco com problema: {st.get('erro')}")
+        print(f"[ERRO] {st.get('erro')}")
         sys.exit(1)
-    print(f"[DB] Teste OK — {st['total']} signos no banco.")
+    print(f"[DB] OK — {st['total_signos']} signos | {st['total_consultas']} consultas")
 
     porta = porta_livre(PORT_INICIAL)
     if porta is None:
-        print("Erro: Nenhuma porta livre (8000-8019).")
-        print("Execute: fuser -k 8000/tcp")
+        print("Nenhuma porta livre. Execute: fuser -k 8000/tcp")
         sys.exit(1)
-
     if porta != PORT_INICIAL:
         print(f"[AVISO] Porta {PORT_INICIAL} ocupada → usando {porta}")
 
@@ -295,17 +350,14 @@ if __name__ == "__main__":
         socketserver.TCPServer.allow_reuse_address = True
         with socketserver.TCPServer(("", porta), MyHandler) as httpd:
             print("=" * 55)
-            print(f"  Acesse no navegador:")
-            print(f"  →  http://127.0.0.1:{porta}")
-            print(f"  Teste do banco:")
-            print(f"  →  http://127.0.0.1:{porta}/api/status")
-            print(f"  Teste de um signo:")
-            print(f"  →  http://127.0.0.1:{porta}/api/signo?data=1995-07-25")
-            print("  Pressione Ctrl+C para parar")
+            print(f"  → http://127.0.0.1:{porta}")
+            print(f"  → http://127.0.0.1:{porta}/api/status")
+            print(f"  → http://127.0.0.1:{porta}/api/historico")
+            print("  Ctrl+C para parar")
             print("=" * 55)
             httpd.serve_forever()
     except OSError as e:
-        print(f"Erro ao iniciar: {e}")
+        print(f"Erro: {e}")
         sys.exit(1)
     except KeyboardInterrupt:
         print("\nServidor encerrado.")
