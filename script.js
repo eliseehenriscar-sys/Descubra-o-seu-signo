@@ -5,17 +5,17 @@ const resultadoCard = document.getElementById("resultado-card");
 const btnVoltar = document.getElementById("btn-voltar");
 const btnDescobrir = document.getElementById("btn-descobrir");
 const erroMsg = document.getElementById("erro-msg");
+const listaHistorico = document.getElementById("lista-historico");
+const btnAtualizarHistorico = document.getElementById("btn-atualizar-historico");
 
 function mostrarErro(texto) {
     erroMsg.innerHTML = texto;
     erroMsg.classList.remove("d-none");
 }
-
 function esconderErro() {
     erroMsg.classList.add("d-none");
     erroMsg.innerHTML = "";
 }
-
 function preencherResultado(signo) {
     document.getElementById("simbolo-signo").textContent = signo.simbolo;
     document.getElementById("nome-signo").textContent = signo.nome;
@@ -30,56 +30,61 @@ function preencherResultado(signo) {
     document.getElementById("compat-signo").textContent = signo.compat;
 }
 
+function carregarHistorico() {
+    fetch("/api/historico")
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+            if (!data.ok || !data.consultas || data.consultas.length === 0) {
+                listaHistorico.innerHTML = '<p class="text-muted-claro small mb-0">Nenhuma consulta ainda. Faça uma busca acima.</p>';
+                return;
+            }
+            var html = '<table class="table table-dark table-sm table-borderless mb-0" style="--bs-table-bg:transparent">';
+            html += '<thead><tr class="text-muted-claro"><th>#</th><th>Nascimento</th><th>Signo</th><th>Quando</th></tr></thead><tbody>';
+            data.consultas.forEach(function (c) {
+                html += '<tr class="text-claro"><td>' + c.id + '</td><td>' + c.data_nascimento + '</td>';
+                html += '<td><strong>' + c.signo_nome + '</strong></td><td class="small">' + c.data_hora + '</td></tr>';
+            });
+            html += '</tbody></table>';
+            listaHistorico.innerHTML = html;
+        })
+        .catch(function () {
+            listaHistorico.innerHTML = '<p class="text-muted-claro small mb-0">Erro ao carregar histórico.</p>';
+        });
+}
+
 form.addEventListener("submit", async function (e) {
     e.preventDefault();
     esconderErro();
-
     if (!inputData.value) {
         inputData.classList.add("is-invalid");
         return;
     }
     inputData.classList.remove("is-invalid");
-
     btnDescobrir.disabled = true;
-    btnDescobrir.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span> Buscando no banco...';
+    btnDescobrir.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span> Buscando...';
 
     try {
-        const statusResp = await fetch("/api/status");
-        if (!statusResp.ok) {
-            throw new Error("Servidor não respondeu em /api/status");
-        }
-        const status = await statusResp.json();
-        if (!status.ok) {
-            throw new Error("Banco de dados com problema: " + (status.erro || "desconhecido"));
-        }
-        if (status.total < 1) {
-            throw new Error("Banco vazio (0 signos). Reinicie o servidor com python3 app.py");
-        }
+        var statusResp = await fetch("/api/status");
+        if (!statusResp.ok) throw new Error("Servidor não respondeu");
+        var status = await statusResp.json();
+        if (!status.ok) throw new Error(status.erro || "Problema no banco");
 
-        const url = "/api/signo?data=" + encodeURIComponent(inputData.value);
-        const resp = await fetch(url);
-
+        var resp = await fetch("/api/signo?data=" + encodeURIComponent(inputData.value));
         if (!resp.ok) {
-            const err = await resp.json().catch(function () { return {}; });
-            throw new Error(err.erro || ("Erro HTTP " + resp.status));
+            var err = await resp.json().catch(function () { return {}; });
+            throw new Error(err.erro || ("Erro " + resp.status));
         }
-
-        const signo = await resp.json();
-        if (!signo.nome) {
-            throw new Error("Resposta do banco sem dados do signo.");
-        }
+        var signo = await resp.json();
+        if (!signo.nome) throw new Error("Sem dados do signo");
 
         preencherResultado(signo);
         formCard.classList.add("d-none");
         resultadoCard.classList.remove("d-none");
         resultadoCard.scrollIntoView({ behavior: "smooth", block: "start" });
-
+        carregarHistorico();
     } catch (err) {
         console.error(err);
-        var msg = "<strong>Erro ao consultar o banco:</strong><br>" + err.message;
-        msg += "<br><br><small>Confirme que você abriu a página pelo servidor ";
-        msg += "(http://127.0.0.1:PORTA) e não abriu o arquivo HTML direto.</small>";
-        mostrarErro(msg);
+        mostrarErro("<strong>Erro:</strong> " + err.message + "<br><small>Use http://127.0.0.1:PORTA (não abra o HTML direto)</small>");
     } finally {
         btnDescobrir.disabled = false;
         btnDescobrir.innerHTML = '<i class="bi bi-search-heart"></i> Descobrir meu signo';
@@ -93,3 +98,8 @@ btnVoltar.addEventListener("click", function () {
     inputData.value = "";
     inputData.focus();
 });
+
+if (btnAtualizarHistorico) {
+    btnAtualizarHistorico.addEventListener("click", carregarHistorico);
+}
+carregarHistorico();
